@@ -217,29 +217,6 @@ app.post('/initiateIVR', function(request, response) {
     response.send(responseString);
 });
 
-app.post('/test', function(request, response) {
-
-    var responseMessage = 'hi hi hi';
-    var sentiment = 'happy';
-    var speechResult = 'yo yo yo';
-
-    var voiceResponse = new VoiceResponse();
-    voiceResponse.play({
-        loop: 1,
-    }, 'https://twiliozendeskcc.herokuapp.com/play/Joanna/' + responseMessage);
-
-    var enqueueTask = voiceResponse.enqueueTask({
-        workflowSid: workflowSid
-    }).task({}, '{"bot_intent": "' + sentiment + '", "type": "voice", "asrtext": "' + speechResult + '"}');
-
-    console.log(voiceResponse.toString());
-
-    var responseString="<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Play>https://twiliozendeskcc.herokuapp.com/play/Joanna/"+responseMessage+"</Play><Enqueue workflowSid="+workflowSid+"><Task>{\"bot_intent\":\""+sentiment+"\", \"type\":\"voice\", \"asrtext\":\""+speechResult+"\"}</Task></Enqueue></Response>";
-    console.log(responseString);
-
-    response.send('');
-});
-
 app.post('/finalResult', function(request, response) {
     console.log('/finalResult');
     console.log('SpeechResult = ' + request.body['SpeechResult']);
