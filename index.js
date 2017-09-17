@@ -9,8 +9,8 @@ var fs = require('fs')
 var querystring = require("querystring");
 var req = require('request');
 
-var twilio = require('twilio');
-// var twilio = require('./node_modules/twilio-node');
+// var twilio = require('twilio');
+var twilio = require('./node_modules/twilio-node');
 var SyncClient = require('twilio-sync');    // remove this when you fix it to use the node helper lib, not the client side sdk
 var twilioChatHelper = require('./public/js/twilioChatHelper');
 var taskrouterTokenHelper = require('./jwt/taskrouter/tokenGenerator');
@@ -28,6 +28,8 @@ var voiceTaskChannelSid = process.env.voiceTaskChannelSid;
 var chatTaskChannelSid = process.env.chatTaskChannelSid;
 
 var syncServiceInstance = process.env.syncServiceInstance;
+var understandServiceInstance = process.env.understandServiceInstance;
+var understandModelBuildSid = process.env.understandModelBuildSid;
 
 var secondAccountSid = process.env.secondAccountSid;
 var secondAuthToken = process.env.secondAuthToken;
@@ -215,90 +217,106 @@ app.post('/initiateIVR', function(request, response) {
     response.send(responseString);
 });
 
-app.post('/partialResult', function(request, response) {
-    console.log('/partialResult');
-    // console.log(request);
+app.post('/test', function(request, response) {
+
+    var responseMessage = 'hi hi hi';
+    var sentiment = 'happy';
+    var speechResult = 'yo yo yo';
+
+    var voiceResponse = new VoiceResponse();
+    voiceResponse.play({
+        loop: 1,
+    }, 'https://twiliozendeskcc.herokuapp.com/play/Joanna/' + responseMessage);
+
+    var enqueueTask = voiceResponse.enqueueTask({
+        workflowSid: workflowSid
+    }).task({}, '{"bot_intent": "' + sentiment + '", "type": "voice", "asrtext": "' + speechResult + '"}');
+
+    console.log(voiceResponse.toString());
+
+    var responseString="<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Play>https://twiliozendeskcc.herokuapp.com/play/Joanna/"+responseMessage+"</Play><Enqueue workflowSid="+workflowSid+"><Task>{\"bot_intent\":\""+sentiment+"\", \"type\":\"voice\", \"asrtext\":\""+speechResult+"\"}</Task></Enqueue></Response>";
+    console.log(responseString);
+
     response.send('');
 });
 
-app.post('/finalresult', function(request,res){
-  console.log('/finalResult');
-  console.log('SpeechResult = ' + request.body['SpeechResult']);
+app.post('/finalResult', function(request, response) {
+    console.log('/finalResult');
+    console.log('SpeechResult = ' + request.body['SpeechResult']);
 
-  var result = querystring.stringify({q: request.body['SpeechResult']});
+    //result of <Gather> verb
+    var speechResult = request.body['SpeechResult'];
 
-  var headers = {
-    'Authorization': 'Bearer UQZMKIWYDG675WZJXOFHWZXGIMDSXHDH'
-  };
+    // default response if unable to determine intent. this is b/c Understand will return intent=null if unable to match well?
+    var responseMessage = querystring.escape("OK. Got it. Please stand by while I connect you to the best possible agent.");
 
-  var options = {
-    url: 'https://api.wit.ai/message?v=20170430&'+result,
-    headers: headers
-  };
+    var opts = {
+        language: 'en-us',
+        query: speechResult,
+        modelBuild: understandModelBuildSid
+    };
 
-  req(options, function(error, response, body) {
-    console.log(body);
-    try {
-      //Works if Wit extracted an intent. 
-      console.log(JSON.parse(body)['entities']['intent'][0]['value']);
-      var textToSpeak = querystring.escape("OK. Got it. Please stand by while I connect you to the best possible agent.");
+    // get the intent
+    twilioClient.preview.understand.services(understandServiceInstance).queries.create(opts).then(classifiedIntent => {
+        console.log(classifiedIntent);
 
-      switch (JSON.parse(body)['entities']['intent'][0]['value']) {
-        case "happy":
-          textToSpeak = querystring.escape("Great. Glad to hear things are going well. We will go ahead and send you a t-shirt to say thank you. Hold on the line for a second if there is anything else we can do.");
-          break;
-        case "needs_help":
-          textToSpeak = querystring.escape("OK - let me get a support representative who can help you immediately.");
-          break;
-        case "problem":
-          textToSpeak = querystring.escape("Hmmm. Sounds like a problem. We can help you with that - one moment. I will escalate your case to a technician.");
-          break;
-        case "angry":
-          textToSpeak = querystring.escape("Oh no. We hate to hear you upset. Let me connect you directly with someone who has authority to make changes to your account")
-          break;
-        case "silly":
-          textToSpeak = querystring.escape("Robots have feelings too you know. That just seems silly. Let me connect you with a human.");
-          break;
-        case "service_question":
-          textToSpeak = querystring.escape("Good question. We have a good answer. Stand by.");
-          break;
-        default:
-          console.log("Could not match " + JSON.parse(body)['entities']['intent'][0]['value'] + " to any switch statement")
-      }
+        var sentiment = classifiedIntent['results'].intent;
+        console.log('understand(sentiment) = ' + sentiment);
+        switch (sentiment) {
+            case 'happy':
+                responseMessage = querystring.escape("Great. Glad to hear things are going well. We will go ahead and send you a t-shirt to say thank you. Hold on the line for a second if there is anything else we can do.");
+                break;
+            case 'needs_help':
+                responseMessage = querystring.escape("OK - let me get a support representative who can help you immediately.");
+                break;
+            case 'problem':
+                responseMessage = querystring.escape("Hmmm. Sounds like a problem. We can help you with that - one moment. I will escalate your case to a technician.");
+                break;
+            case 'angry':
+                responseMessage = querystring.escape("Oh no. We hate to hear you upset. Let me connect you directly with someone who has authority to make changes to your account");
+                break;
+            case 'silly':
+                responseMessage = querystring.escape("Robots have feelings too you know. That just seems silly. Let me connect you with a human.");
+                break;
+            case 'service_question':
+                responseMessage = querystring.escape("Good question. We have a good answer. Stand by.");
+                break;
+            default:
+                sentiment = "service_question"; // if understand returns sentiment=null, this will be the default choice
+                console.log('Failed to get a sentiment value, using the default statement.');
+        }
 
-      var responseString="<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Play>https://twiliozendeskcc.herokuapp.com/play/Joanna/"+textToSpeak+"</Play><Enqueue workflowSid="+workflowSid+"><Task>{\"bot_intent\":\""+JSON.parse(body)['entities']['intent'][0]['value']+"\", \"type\":\"voice\", \"asrtext\":\""+request.body['SpeechResult']+"\"}</Task></Enqueue></Response>";
-      res.send(responseString);
-    } catch (err) {
-      // Failed to extract an intent. Ask the fool again.
-      var textToSpeak = querystring.escape("Say what now? Please tell us how we can help, you");
-      var responseString="<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Gather input=\"speech\" action=\"/finalresult\" partialResultCallback=\"/partialResult\" hints=\"voice, sms, twilio\"><Play>https://twiliozendeskcc.herokuapp.com/play/Joanna/"+textToSpeak+"</Play></Gather></Response>";
-      res.send(responseString);
-    }
-  });
-});
+        var voiceResponse = new VoiceResponse();
+        voiceResponse.play({
+            loop: 1,
+        }, 'https://twiliozendeskcc.herokuapp.com/play/Joanna/' + responseMessage);
 
-app.post('/partialresult', function(request,response){
-    console.log('/partialResult');
+        voiceResponse.enqueueTask({
+            workflowSid: workflowSid
+        }).task({}, '{"bot_intent": "' + sentiment + '", "type": "voice", "asrtext": "' + speechResult + '"}');
 
-  console.log(request.body['IncrementalSpeechResult']);
-  var result = querystring.stringify({q: request.body['IncrementalSpeechResult']});
+        response.send(voiceResponse.toString());
+    }).catch(err => {
+        // failed to classify
+        console.log('Error getting intent from Understand. Error: ' + err);
 
-  var headers = {
-    'Authorization': 'Bearer UQZMKIWYDG675WZJXOFHWZXGIMDSXHDH'
-  };
+        // ask again
+        responseMessage = querystring.escape("Say what now? Please tell us how we can help, you");
 
-  var options = {
-    url: 'https://api.wit.ai/message?v=20170430&'+result,
-    headers: headers
-  };
+        var voiceResponse = new VoiceResponse();
+        var gather = voiceResponse.gather({
+            input: 'speech',
+            action: '/finalResult',
+            partialResultCallback: '/partialResult',
+            hints: 'voice, sms, twilio'
+        });
 
-  req(options, function(error, response, body){
-    console.log(body);
-    try {
-      console.log(JSON.parse(body)['entities']['intent'][0]['value']);
-    } catch (err) {}
-  });
-  response.send('');
+        gather.play({
+            loop: 1
+        }, 'https://twiliozendeskcc.herokuapp.com/play/Joanna/' + responseMessage);
+
+        response.send(voiceResponse.toString());
+    });
 });
 
 // configured messaging endpoint (via SMS to a Twilio number or FB Messenger)
