@@ -3,18 +3,19 @@ require('dotenv').load();
 var AWS = require('aws-sdk');
 var bodyParser = require('body-parser');
 var express = require('express');
+var Firebase = require('firebase');
+var FirebaseTokenGenerator = require('firebase-token-generator');
 var fs = require('fs')
 var querystring = require("querystring");
 var req = require('request');
 
-// var twilio = require('twilio');
-var twilio = require('./node_modules/twilio-node');
-var AccessManager = require('twilio-common').AccessManager;
+var twilio = require('twilio');
+// var twilio = require('./node_modules/twilio-node');
 var SyncClient = require('twilio-sync');    // remove this when you fix it to use the node helper lib, not the client side sdk
 var twilioChatHelper = require('./public/js/twilioChatHelper');
 var taskrouterTokenHelper = require('./jwt/taskrouter/tokenGenerator');
 var twilioClientTokenHelper = require('./jwt/client/tokenGenerator');
-var twilioSyncChatTokenHelper = require('./jwt/sync/tokenGenerator');
+var twilioSyncChatHelper = require('./jwt/sync/tokenGenerator');
 var VoiceResponse = twilio.twiml.VoiceResponse;
 
 // Twilio creds
@@ -27,8 +28,6 @@ var voiceTaskChannelSid = process.env.voiceTaskChannelSid;
 var chatTaskChannelSid = process.env.chatTaskChannelSid;
 
 var syncServiceInstance = process.env.syncServiceInstance;
-var understandServiceInstance = process.env.understandServiceInstance;
-var understandModelBuildSid = process.env.understandModelBuildSid;
 
 var secondAccountSid = process.env.secondAccountSid;
 var secondAuthToken = process.env.secondAuthToken;
@@ -37,8 +36,10 @@ var twilioPhoneNumber = process.env.twilioPhoneNumber;
 var twilioPhoneNumberSkipBot = process.env.twilioPhoneNumberSkipBot;
 var alsPhoneNumber = process.env.alsPhoneNumber;
 
-// Facebook  creds
+// Meya, Facebook, Firebase creds
+var meyaAPIKey = process.env.meyaAPIKey;
 var pageAccessToken = process.env.pageAccessToken; //facebook
+var firebaseSecret = process.env.firebaseSecret;
 
 // Server side setup
 
@@ -56,26 +57,39 @@ if (!fs.existsSync('/tmp')) {
     fs.mkdirSync('/tmp');
 }
 
+// Firebase setup
+console.log("Trying to authenticate to Firebase with secret " + firebaseSecret);
+var firebaseTokenGenerator = new FirebaseTokenGenerator(firebaseSecret);
+//firebase instance is set to allow read from any client, but write only from secure-server. From firebase settings:
+/*{
+    "rules": {
+        ".read": true,
+        ".write": "auth.uid === 'secure-server'"
+    }
+}
+*/
+//probably ought to implement some sort of token refresh function
+//firebase expires parameter is seconds since epoch (set to expire Tuesday, August 3, 2100)
+var firebaseToken = firebaseTokenGenerator.createToken({ uid: "secure-server"}, { expires: 4121017284});
+console.log("Firebase Token: " + firebaseToken);
+var myFirebase = new Firebase("https://taskrouter.firebaseio.com/");
+myFirebase.authWithCustomToken(firebaseToken, function(error, authData) {
+  if (error) {
+    console.log("Firebase Auth Error: " + error);
+  } else {
+    console.log("Firebase Auth Status: ");
+    console.log(authData);
+  }
+});
 
 // Twilio node helper lib setup
 var twilioClient = new twilio(accountSid, authToken);
 var secondTwilioClient = new twilio(secondAccountSid, secondAuthToken);  // for sending messages to FB; something about Twilio Channels something something
 var syncService = twilioClient.sync.services(syncServiceInstance);
 
-var identity = 'Al Cook';
-var accessToken = twilioSyncChatTokenHelper.getSyncAndChatToken(identity);
+var identity = 'al';
+var accessToken = twilioSyncChatHelper.getSyncAndChatToken(identity);
 var syncClient = new SyncClient(accessToken);
-
-let accessManager = new AccessManager(accessToken); // needed for uninterrupted access when using the syncClient server side
-
-accessManager.on('tokenUpdated', am => {
-    // get new token from AccessManager and pass it to the library instance
-    syncClient.updateToken(am.token);
-});
-
-// track phoneNumbers of audience members
-var phoneNumbers = [];
-var facebookIds = [];
 
 // Express setup
 var app = express();
@@ -133,75 +147,28 @@ app.get('/reservationmodal', function(request, response) {
 app.get('/token', function(request, response) {
   const identity = 'al';
   const chatIdentity = 'Al Cook';   // realistically this should be the workerSid, request.query.workerSid
+  const deviceId = 'browser';   // this should also be some unique identifier
   response.send({ 
     taskRouterToken: taskrouterTokenHelper.getTaskRouterWorkerCapabilityToken(accountSid, authToken, workspaceSid, workerSid),
-    syncToken: twilioSyncChatTokenHelper.getSyncAndChatToken(identity),
+    syncToken: twilioSyncChatHelper.getSyncAndChatToken(identity), 
     clientToken: twilioClientTokenHelper.getClientCapabilityToken(accountSid, authToken, identity),
-    chatToken: twilioSyncChatTokenHelper.getSyncAndChatToken(chatIdentity)
+    chatToken: twilioSyncChatHelper.getSyncAndChatToken(chatIdentity, deviceId)
   });
 });
 
-
 app.get('/workspaceToken', function(request, response) {
-   response.send('');
+  response.send({
+      workspaceToken: taskrouterTokenHelper.getTaskRouterWorkspaceCapabilityToken(accountSid, authToken, workspaceSid, workerSid),
+      workerToken: taskrouterTokenHelper.getTaskRouterWorkerCapabilityToken(accountSid, authToken, workspaceSid, workerSid),
+      syncToken: twilioSyncChatHelper.getSyncAndChatToken(identity)
+  });
 });
-
-// app.get('/workspaceToken', function(request, response) {
-//     console.log('here');
-//
-//   response.send({
-//       workspaceToken: taskrouterTokenHelper.getTaskRouterWorkspaceCapabilityToken(accountSid, authToken, workspaceSid, workerSid),
-//       workerToken: taskrouterTokenHelper.getTaskRouterWorkerCapabilityToken(accountSid, authToken, workspaceSid, workerSid),
-//       syncToken: twilioSyncChatHelper.getSyncAndChatToken(identity)
-//   });
-// });
 
 
 app.get('/visualize', function(request, response) {
   //visualize shows a visual representation of TaskRouter state
   response.setHeader('Cache-Control', 'no-cache');
   response.render('pages/visualize');
-});
-
-app.post('/sendMessageToAttendees', function(request, response) {
-    var message = 'Thanks for coming to our presentation at SIGNAL London 2017!' +
-        ' Visit https://www.twilio.com/docs/api/contact-center-blueprint to lean more about Contact Centers.' +
-        ' Feel free to contact us at al@twilio.com and wli@twilio.com. We\'d appreciate your feedback, forms are in the back of the room. See you at $bash!';
-
-    // texters
-    phoneNumbers.forEach(audiencePhoneNumber => {
-        // send SMS
-        twilioClient.messages.create({
-            to: audiencePhoneNumber,
-            from: twilioPhoneNumber, // twilio phone number
-            body: message
-        }).then(message => {
-            console.log('Successfully sent message to: ' + request.query.to);
-        }).catch(err => {
-            console.log('Failed to send message to: ' + request.query.to);
-        });
-    });
-
-    // fb'ers
-    let messageData = { text: message };
-
-    facebookIds.forEach(fbId => {
-        request({
-            url: 'https://graph.facebook.com/v2.6/me/messages',
-            qs: { access_token: pageAccessToken},
-            method: 'POST',
-            json: {
-                recipient: { id: fbId },
-                message: messageData,
-            }
-        }, function(error, response, body) {
-            if (error) {
-                console.log('Error sending messages: ', error)
-            } else if (response.body.error) {
-                console.log('Error: ', response.body.error)
-            }
-        });
-    });
 });
 
 app.post('/voicenoivr', function(request,response) {
@@ -211,8 +178,6 @@ app.post('/voicenoivr', function(request,response) {
 });
 
 app.post('/initiateIVR', function(request, response) {
-    phoneNumbers.push(request.body['From']);
-
     var welcomeMessage = querystring.escape("Hello and welcome to the best customer experience youve ever had. Thats right. British Customer Service. Please tell us how we can help.");
     var didNotHearMessage = querystring.escape("Did you say anything?");
 
@@ -227,7 +192,7 @@ app.post('/initiateIVR', function(request, response) {
 
     gather.play({
         loop: 1
-    }, 'https://twiliozendeskcc.herokuapp.com/play/Amy/' + welcomeMessage);
+    }, 'https://twiliozendeskcc.herokuapp.com/play/Joanna/' + welcomeMessage);
 
     gather.pause({
         length: 10
@@ -235,7 +200,7 @@ app.post('/initiateIVR', function(request, response) {
 
     voiceResponse.play({
         loop: 1
-    }, 'https://twiliozendeskcc.herokuapp.com/play/Amy/' + didNotHearMessage);
+    }, 'https://twiliozendeskcc.herokuapp.com/play/Joanna/' + didNotHearMessage);
 
     voiceResponse.redirect({
         method: 'POST'
@@ -249,89 +214,88 @@ app.post('/initiateIVR', function(request, response) {
 
 app.post('/partialResult', function(request, response) {
     console.log('/partialResult');
-
-    // console.log(request);        // purely for debugging purposes, provides no other value in this scenario
-
+    // console.log(request);
     response.send('');
 });
 
-app.post('/finalResult', function(request, response) {
-    console.log('/finalResult');
-    console.log('SpeechResult = ' + request.body['SpeechResult']);
+app.post('/finalresult', function(request,res){
+  console.log('/finalResult');
+  console.log('SpeechResult = ' + request.body['SpeechResult']);
 
-    //result of <Gather> verb
-    var speechResult = request.body['SpeechResult'];
+  var result = querystring.stringify({q: request.body['SpeechResult']});
 
-    // default response if unable to determine intent. this is b/c Understand will return intent=null if unable to match well?
-    var responseMessage = querystring.escape("OK. Got it. Please stand by while I connect you to the best possible agent.");
+  var headers = {
+    'Authorization': 'Bearer UQZMKIWYDG675WZJXOFHWZXGIMDSXHDH'
+  };
 
-    var opts = {
-        language: 'en-us',
-        query: speechResult,
-        modelBuild: understandModelBuildSid
-    };
+  var options = {
+    url: 'https://api.wit.ai/message?v=20170430&'+result,
+    headers: headers
+  };
 
-    // get the intent
-    twilioClient.preview.understand.services(understandServiceInstance).queries.create(opts).then(classifiedIntent => {
-        console.log(classifiedIntent);
+  req(options, function(error, response, body) {
+    console.log(body);
+    try {
+      //Works if Wit extracted an intent. 
+      console.log(JSON.parse(body)['entities']['intent'][0]['value']);
+      var textToSpeak = querystring.escape("OK. Got it. Please stand by while I connect you to the best possible agent.");
 
-        var sentiment = classifiedIntent['results'].intent;
-        console.log('understand(sentiment) = ' + sentiment);
-        switch (sentiment) {
-            case 'happy':
-                responseMessage = querystring.escape("Great. Glad to hear things are going well. We will go ahead and send you a t-shirt to say thank you. Hold on the line for a second if there is anything else we can do.");
-                break;
-            case 'needs_help':
-                responseMessage = querystring.escape("OK - let me get a support representative who can help you immediately.");
-                break;
-            case 'problem':
-                responseMessage = querystring.escape("Hmmm. Sounds like a problem. We can help you with that - one moment. I will escalate your case to a technician.");
-                break;
-            case 'angry':
-                responseMessage = querystring.escape("Oh no. We hate to hear you upset. Let me connect you directly with someone who has authority to make changes to your account");
-                break;
-            case 'silly':
-                responseMessage = querystring.escape("Robots have feelings too you know. That just seems silly. Let me connect you with a human.");
-                break;
-            case 'service_question':
-                responseMessage = querystring.escape("Good question. We have a good answer. Stand by.");
-                break;
-            default:
-                sentiment = "service_question"; // if understand returns sentiment=null, this will be the default choice
-                console.log('Failed to get a sentiment value, using the default statement.');
-        }
+      switch (JSON.parse(body)['entities']['intent'][0]['value']) {
+        case "happy":
+          textToSpeak = querystring.escape("Great. Glad to hear things are going well. We will go ahead and send you a t-shirt to say thank you. Hold on the line for a second if there is anything else we can do.");
+          break;
+        case "needs_help":
+          textToSpeak = querystring.escape("OK - let me get a support representative who can help you immediately.");
+          break;
+        case "problem":
+          textToSpeak = querystring.escape("Hmmm. Sounds like a problem. We can help you with that - one moment. I will escalate your case to a technician.");
+          break;
+        case "angry":
+          textToSpeak = querystring.escape("Oh no. We hate to hear you upset. Let me connect you directly with someone who has authority to make changes to your account")
+          break;
+        case "silly":
+          textToSpeak = querystring.escape("Robots have feelings too you know. That just seems silly. Let me connect you with a human.");
+          break;
+        case "service_question":
+          textToSpeak = querystring.escape("Good question. We have a good answer. Stand by.");
+          break;
+        default:
+          console.log("Could not match " + JSON.parse(body)['entities']['intent'][0]['value'] + " to any switch statement")
+      }
 
-        var voiceResponse = new VoiceResponse();
-        voiceResponse.play({
-            loop: 1,
-        }, 'https://twiliozendeskcc.herokuapp.com/play/Joanna/' + responseMessage);
+      var responseString="<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Play>https://twiliozendeskcc.herokuapp.com/play/Joanna/"+textToSpeak+"</Play><Enqueue workflowSid="+workflowSid+"><Task>{\"bot_intent\":\""+JSON.parse(body)['entities']['intent'][0]['value']+"\", \"type\":\"voice\", \"asrtext\":\""+request.body['SpeechResult']+"\"}</Task></Enqueue></Response>";
+      res.send(responseString);
+    } catch (err) {
+      // Failed to extract an intent. Ask the fool again.
+      var textToSpeak = querystring.escape("Say what now? Please tell us how we can help, you");
+      var responseString="<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Gather input=\"speech\" action=\"/finalresult\" partialResultCallback=\"/partialResult\" hints=\"voice, sms, twilio\"><Play>https://twiliozendeskcc.herokuapp.com/play/Joanna/"+textToSpeak+"</Play></Gather></Response>";
+      res.send(responseString);
+    }
+  });
+});
 
-        voiceResponse.enqueueTask({
-            workflowSid: workflowSid
-        }).task({}, '{"bot_intent": "' + sentiment + '", "type": "voice", "asrtext": "' + speechResult + '"}');
+app.post('/partialresult', function(request,response){
+    console.log('/partialResult');
 
-        response.send(voiceResponse.toString());
-    }).catch(err => {
-        // failed to classify
-        console.log('Error getting intent from Understand. Error: ' + err);
+  console.log(request.body['IncrementalSpeechResult']);
+  var result = querystring.stringify({q: request.body['IncrementalSpeechResult']});
 
-        // ask again
-        responseMessage = querystring.escape("Say what now? Please tell us how we can help, you");
+  var headers = {
+    'Authorization': 'Bearer UQZMKIWYDG675WZJXOFHWZXGIMDSXHDH'
+  };
 
-        var voiceResponse = new VoiceResponse();
-        var gather = voiceResponse.gather({
-            input: 'speech',
-            action: '/finalResult',
-            partialResultCallback: '/partialResult',
-            hints: 'voice, sms, twilio'
-        });
+  var options = {
+    url: 'https://api.wit.ai/message?v=20170430&'+result,
+    headers: headers
+  };
 
-        gather.play({
-            loop: 1
-        }, 'https://twiliozendeskcc.herokuapp.com/play/Joanna/' + responseMessage);
-
-        response.send(voiceResponse.toString());
-    });
+  req(options, function(error, response, body){
+    console.log(body);
+    try {
+      console.log(JSON.parse(body)['entities']['intent'][0]['value']);
+    } catch (err) {}
+  });
+  response.send('');
 });
 
 // configured messaging endpoint (via SMS to a Twilio number or FB Messenger)
@@ -348,25 +312,19 @@ app.post('/initiateMessagingBot', function(request, response) {
         // Why? Need to distinguish if it is the FIRST message from the customer
         // or if it is a CONTINUATION of a conversation from the customer
     var queryJSON = {};
-    var considerAsNewInteraction=1
     queryJSON['EvaluateTaskAttributes'] = "(message_from=\"" + request.body['From'] + "\")";
 
     twilioClient.taskrouter.workspaces(workspaceSid).tasks.list(queryJSON).then(tasks => {
-        console.log(tasks.length);
+        console.log('Found tasks with this "from"');
+        console.log(tasks);
 
         if (tasks.length > 0) {
-          console.log("WTF");
-
             tasks.forEach(task => {
-                console.log('Found tasks with this "from" ' +task.sid + " " + task.assignmentStatus);
-
-                //console.log('Logging task');
-                //console.log(task);
+                console.log('Logging task');
+                console.log(task);
                 // determine if the Task is still active - pending, reserved, assigned (not completed)
                 if (task.assignmentStatus == 'pending' || task.assignmentStatus == 'reserved'
                     || task.assignmentStatus == 'assigned') {
-                  sendMessageToBotLogicIfNeeded(task, request);
-                  considerAsNewInteraction = 0;
 
                     // first fetch the user's name out of syncMap of UserProfiles
                     syncService.syncMaps('UserProfiles').syncMapItems(task.sid + '.info').fetch().then(response => {
@@ -377,11 +335,10 @@ app.post('/initiateMessagingBot', function(request, response) {
                         twilioChatHelper.sendChat(task.sid, request.body['Body'], userIdentity);
                     });
                 }
-                // if it's not this, the task is complete but has not been deleted yet - so we need to consider it as a new interaction 
+                // else {} if the Task is not in an active state, do nothing. game over.
             });
-        } 
-        if (considerAsNewInteraction) {  // it is the first message from this user in the TaskRouter system; create a Task to represent it and insert the message into chat container
-            console.log('No active Tasks found with this "from". Creating Task for this instead.');
+        } else {  // it is the first message from this user in the TaskRouter system; create a Task to represent it and insert the message into chat container
+            console.log('No found Tasks with this "from". Creating Task for this instead.');
 
             var attributesJSON = {};
             attributesJSON['message_from'] = request.body['From'];
@@ -408,12 +365,9 @@ app.post('/initiateMessagingBot', function(request, response) {
                 // if no, then we need to fetch caller details with Marketplace Addons
                 var id = request.body['From'];
                 if (id.substr(0, 10) == "messenger:") {
-                    facebookIds.push(id);
                     id = id.replace('messenger:', '');
-
                     handleInboundFBMessage(id, createdTask.sid, request.body['Body']);
                 } else {
-                    phoneNumbers.push(request.body['From']);
                     try {
                         var addOnsData = JSON.parse(createdTask.addons);
 
@@ -478,10 +432,15 @@ app.post('/initiateMessagingBot', function(request, response) {
                     // push the message to Chat channel
                     var userIdentity = friendlyName_first + ' ' + friendlyName_last;
                     twilioChatHelper.sendChat(createdTask.sid, request.body['Body'], userIdentity);
-                    sendMessageToBotLogicIfNeeded(createdTask, request);
                 }
 
-                
+                // send to Meya AI bot if necessary
+                var hasBotQualifiedProperty = JSON.parse(createdTask.attributes).hasOwnProperty('bot_qualified');
+                console.log('Is the task on INITIAL creation Bot Qualified ? ' + hasBotQualifiedProperty);
+
+                if (!hasBotQualifiedProperty) {
+                    sendToMeyaBotForInitialQualification(createdTask, request);
+                }
             }).catch(err => {
                 console.log('Failed to create Task for SMS from : ' + request.body['From'] + ' due to : ' + err);
             });
@@ -489,15 +448,6 @@ app.post('/initiateMessagingBot', function(request, response) {
     });
     response.send('');
 });
-
-function sendMessageToBotLogicIfNeeded(task,request) {
-  var hasBotQualifiedProperty = JSON.parse(task.attributes).hasOwnProperty('bot_qualified');
-  console.log('Is the task on INITIAL creation Bot Qualified ? ' + hasBotQualifiedProperty);
-
-  if (!hasBotQualifiedProperty) {
-      automateReply(task, request);
-  }
-}
 
 function handleInboundFBMessage(facebookId, taskSid, messageBody) {
     var results = {};
@@ -553,38 +503,28 @@ function handleInboundFBMessage(facebookId, taskSid, messageBody) {
     });
 }
 
-function automateReply(task, request) {
-    // the given Task has not yet been bot qualified => so we will use Understand to determine the intent
-    // and then automate our replies
-    console.log('Sending Task ' + task.sid + ' to Wit.ai for analysis');
+function sendToMeyaBotForInitialQualification(task, request) {
+    // the given Task has not yet been bot qualified => send to Meya AI first
+    var meyaUserID = {};
 
-    getResponseBasedOnSentiment(request.body['Body'], function(sentimentResponse) {
-      console.log("Result of analyzing " + request.body['Body'] + " is " + JSON.stringify(sentimentResponse))
-      var smsClientToUse = twilioClient;
+    //We munge multiple parameters together to pass all the context to Meya. I had to shorten the Messenger prefix to stay within character count limits.
+    meyaUserID['from'] = request.body['From'].replace("messenger:", "M@");
+    meyaUserID['to'] = request.body['To'].replace("messenger:", "M@");
+    meyaUserID['sid'] = task.sid;
+    meyaUserID_string = meyaUserID['from'] + "@@" + meyaUserID['to'] + "@@" + task.sid;
+    console.log("Meya User ID: " + meyaUserID_string);
 
-       
-      if (sentimentResponse.intent != "fail" && sentimentResponse.intent != "greeting") {
-        updateTaskAttributes(task.sid, {"bot_qualified":"true", "bot_intent":sentimentResponse.intent})
-      }
-      smsClientToUse.messages.create({
-          to: request.body['From'], // Any number Twilio can deliver to
-          from: request.body['To'], // A number you bought from Twilio and can use for outbound communication
-          body: sentimentResponse.reply, // body of the SMS message
-          statusCallback: 'https://twiliozendeskcc.herokuapp.com/messagestatus/'
-      }).then(createdMessage => {
-          console.log('Successfully sent response as SMS back to User.');
-          console.log(createdMessage);
-      }).catch(err => {
-          console.log('Failed to send response as SMS back to User due to error: ' + err);
-      });
+    // send to Meya AI for initial qualification (this only happens b/c the task does not have a property 'bot_qualified=true')
+    console.log('Sending Task ' + task.sid + ' to Meya for bot qualification');
+    console.log('Send to Meya AI the message body: ' + request.body['Body']);
 
-      // push the bot response into the Chat Channel, but as the "server" == worker
-      // you know cause bot == worker in this case
-      twilioChatHelper.sendChat(task.sid, sentimentResponse.reply, 'Al Cook');
-    });  
+    req.post('https://meya.ai/webhook/receive/BCvshMlsyFf').auth(meyaAPIKey).form({
+        user_id: meyaUserID_string,
+        text: request.body['Body']
+    }).on('response', function(response) {
+        console.log('Meya bot qualification response : ' + response);
+    });
 }
-
-
 
 function updateTaskAttributes(taskSid, sourceTargetAttributes) {
   twilioClient.taskrouter.workspaces(workspaceSid).tasks(taskSid).fetch().then(task => {
@@ -611,7 +551,7 @@ function updateTaskAttributes(taskSid, sourceTargetAttributes) {
 }
 
 app.get('/deletealltasks', function(request, response) {
-  //this page purges all TaskRouter Sync and Chat content in order to reset the demo
+  //this page purges all TaskRouter and Firebase content in order to reset the demo
 
   twilioClient.taskrouter.workspaces(workspaceSid).tasks.list(function(err, tasks) {
     if (!err) {
@@ -651,6 +591,7 @@ app.get('/deletealltasks', function(request, response) {
                     });
                 });
 
+  myFirebase.remove();
   response.send('all tasks deleted');
 });
 
@@ -667,6 +608,7 @@ app.get('/completeTask', function(request, response) {
         console.log('Task update error: ' + err);
     });
 
+    myFirebase.child(request.query.sid).remove();
     response.send('');
 });
 
@@ -728,6 +670,49 @@ app.get('/getTaskRepresentation', function(request, response) {
   });
 });
 
+app.post('/botresponse', function(request, response) {
+    // desired behavior
+    // - receive bot response
+    // parse task SID out from bot response
+    // add response to firebase index by task SID
+    // lookup from URI from task SID
+    // send response back to customer
+    //
+    // if yes, get task sid
+    // add message to firebase entry for task sid
+    // if task is not bot_qualified
+    //    send message to meya with from set to task SID
+
+    console.log("bot replied");
+    console.log("trying to get the details for this task with sid " + request.body.user_id);
+
+    var meyaUserID = request.body.user_id.split("@@");
+    var smsClientToUse = twilioClient;
+
+    // Temporary hack to send facebook messages from a different account
+    if (meyaUserID[0].includes("M@")) {
+        smsClientToUse = secondTwilioClient;
+    }
+
+    smsClientToUse.messages.create({
+        to: meyaUserID[0].replace("M@", "messenger:"), // Any number Twilio can deliver to
+        from: meyaUserID[1].replace("M@", "messenger:"), // A number you bought from Twilio and can use for outbound communication
+        body: request.body.text, // body of the SMS message
+        statusCallback: 'https://twiliozendeskcc.herokuapp.com/messagestatus/'
+    }).then(createdMessage => {
+        console.log('Successfully sent Meya Bot response as SMS back to User.');
+        console.log(createdMessage);
+    }).catch(err => {
+        console.log('Failed to send Meya Bot response as SMS back to User due to error: ' + err);
+        console.log('To: ' + meyaUserID[0] + ' From: ' + meyaUserID[1] + ' MessageBody: ' + request.body.text);
+    });
+
+    // push the bot response into the Chat Channel, but as the "server" == worker
+    // you know cause bot == worker in this case
+    twilioChatHelper.sendChat(meyaUserID[2], request.body.text, 'Al Cook');
+
+    response.send('');
+});
 
 app.post('/syncEventStream', function(request, response) {
     // update the appropriate syncMap when an event is received from TaskRouter eventCallback config
@@ -843,21 +828,19 @@ app.post('/syncEventStream', function(request, response) {
 
                 dataToSet['queue'] = request.body.TaskQueueName;
 
-                /*syncClient.map('TaskList.' + request.body.WorkerSid).then(syncMap => {
+                syncClient.map('TaskList.' + request.body.WorkerSid).then(syncMap => {
                     syncMap.set(request.body.TaskSid, dataToSet);
-                });*/
+                });
                 syncClient.map('TaskList.Queue').then(syncMap => {
                     syncMap.remove(request.body.TaskSid);
                 });
 
                 var newAttributes = {'worker' : request.body.WorkerSid};
                 updateTaskAttributes(request.body.TaskSid, newAttributes);
+                var addons = JSON.parse(request.body.TaskAddons);
 
-                
-
-                //dataToSet={};
+                dataToSet={};
                 try {
-                    var addons = JSON.parse(request.body.TaskAddons);
                     dataToSet['name']=addons.nextcaller_advanced_caller_id.records[0].name;
                     dataToSet['address']=addons.nextcaller_advanced_caller_id.records[0].address[0].line1 + " " + addons.nextcaller_advanced_caller_id.records[0].address[0].city + " " + addons.nextcaller_advanced_caller_id.records[0].address[0].zip_code;
                 } catch (err) {
@@ -935,7 +918,8 @@ app.get('/sendSMS', function(request, response) {
 });
 
 app.post('/messagestatus', function(request, response) {
-
+  // This function consumes the event stream and structures it into firebase data
+  // This firebase structure is then used for real time visualization of queue state
   console.log("received message status " + JSON.stringify(request.body));
   response.send('');
 });

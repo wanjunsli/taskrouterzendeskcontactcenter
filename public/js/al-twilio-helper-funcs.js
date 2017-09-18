@@ -53,7 +53,7 @@ function acceptTask(tasksid, reservationsid, channel) {
         data: { 'tasksid': tasksid, 'reservationsid': reservationsid, 'channel':channel },
         type: 'get',
         success: function(output) {
-            console.log("received OK to accept task");
+            console.log("received OK to accept task" + output);
 
         }
     });
