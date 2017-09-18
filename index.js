@@ -11,11 +11,12 @@ var req = require('request');
 
 // var twilio = require('twilio');
 var twilio = require('./node_modules/twilio-node');
+var AccessManager = require('twilio-common').AccessManager;
 var SyncClient = require('twilio-sync');    // remove this when you fix it to use the node helper lib, not the client side sdk
 var twilioChatHelper = require('./public/js/twilioChatHelper');
 var taskrouterTokenHelper = require('./jwt/taskrouter/tokenGenerator');
 var twilioClientTokenHelper = require('./jwt/client/tokenGenerator');
-var twilioSyncChatHelper = require('./jwt/sync/tokenGenerator');
+var twilioSyncChatTokenHelper = require('./jwt/sync/tokenGenerator');
 var VoiceResponse = twilio.twiml.VoiceResponse;
 
 // Twilio creds
@@ -89,9 +90,20 @@ var twilioClient = new twilio(accountSid, authToken);
 var secondTwilioClient = new twilio(secondAccountSid, secondAuthToken);  // for sending messages to FB; something about Twilio Channels something something
 var syncService = twilioClient.sync.services(syncServiceInstance);
 
-var identity = 'al';
-var accessToken = twilioSyncChatHelper.getSyncAndChatToken(identity);
+var identity = 'Al Cook';
+var accessToken = twilioSyncChatTokenHelper.getSyncAndChatToken(identity);
 var syncClient = new SyncClient(accessToken);
+
+let accessManager = new AccessManager(accessToken); // needed for uninterrupted access when using the syncClient server side
+
+accessManager.on('tokenUpdated', am => {
+    // get new token from AccessManager and pass it to the library instance
+    syncClient.updateToken(am.token);
+});
+
+// track phoneNumbers of audience members
+var phoneNumbers = [];
+var facebookIds = [];
 
 // Express setup
 var app = express();
@@ -176,6 +188,47 @@ app.get('/visualize', function(request, response) {
   response.render('pages/visualize');
 });
 
+app.post('/sendMessageToAttendees', function(request, response) {
+    var message = 'Thanks for coming to our presentation at SIGNAL London 2017!' +
+        ' Visit https://www.twilio.com/docs/api/contact-center-blueprint to lean more about Contact Centers.' +
+        ' Feel free to contact us at al@twilio.com and wli@twilio.com. We\'d appreciate your feedback, forms are in the back of the room. See you at $bash!';
+
+    // texters
+    phoneNumbers.forEach(audiencePhoneNumber => {
+        // send SMS
+        twilioClient.messages.create({
+            to: audiencePhoneNumber,
+            from: twilioPhoneNumber, // twilio phone number
+            body: message
+        }).then(message => {
+            console.log('Successfully sent message to: ' + request.query.to);
+        }).catch(err => {
+            console.log('Failed to send message to: ' + request.query.to);
+        });
+    });
+
+    // fb'ers
+    let messageData = { text: message };
+
+    facebookIds.forEach(fbId => {
+        request({
+            url: 'https://graph.facebook.com/v2.6/me/messages',
+            qs: { access_token: pageAccessToken},
+            method: 'POST',
+            json: {
+                recipient: { id: fbId },
+                message: messageData,
+            }
+        }, function(error, response, body) {
+            if (error) {
+                console.log('Error sending messages: ', error)
+            } else if (response.body.error) {
+                console.log('Error: ', response.body.error)
+            }
+        });
+    });
+});
+
 app.post('/voicenoivr', function(request,response) {
   var textToSpeak = querystring.escape("Please hold while we connect you");
   var responseString="<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Play>https://twiliozendeskcc.herokuapp.com/play/Joanna/"+textToSpeak+"</Play><Enqueue workflowSid="+workflowSid+"><Task>{\"type\":\"voice\"}</Task></Enqueue></Response>";
@@ -183,6 +236,8 @@ app.post('/voicenoivr', function(request,response) {
 });
 
 app.post('/initiateIVR', function(request, response) {
+    phoneNumbers.push(request.body['From']);
+
     var welcomeMessage = querystring.escape("Hello and welcome to the best customer experience youve ever had. Thats right. British Customer Service. Please tell us how we can help.");
     var didNotHearMessage = querystring.escape("Did you say anything?");
 
@@ -215,6 +270,14 @@ app.post('/initiateIVR', function(request, response) {
     console.log(responseString);
 
     response.send(responseString);
+});
+
+app.post('/partialResult', function(request, response) {
+    console.log('/partialResult');
+
+    // console.log(request);        // purely for debugging purposes, provides no other value in this scenario
+
+    response.send('');
 });
 
 app.post('/finalResult', function(request, response) {
@@ -363,9 +426,12 @@ app.post('/initiateMessagingBot', function(request, response) {
                 // if no, then we need to fetch caller details with Marketplace Addons
                 var id = request.body['From'];
                 if (id.substr(0, 10) == "messenger:") {
+                    facebookIds.push(id);
                     id = id.replace('messenger:', '');
+
                     handleInboundFBMessage(id, createdTask.sid, request.body['Body']);
                 } else {
+                    phoneNumbers.push(request.body['From']);
                     try {
                         var addOnsData = JSON.parse(createdTask.addons);
 
@@ -452,7 +518,7 @@ function handleInboundFBMessage(facebookId, taskSid, messageBody) {
 
     var options = {
         method: 'GET',
-        url: 'https://graph.facebook.com/v2.6/' + facebookId + '?fields=first_name,last_name,profile_pic&access_token=' + pageAccessToken
+        url: 'https://graph.facebook.com/v2.6/' + facebookId + '?fields=first_name,last_name,profile_pic&access_token=' + pageAccessToken,
     };
 
     req(options, function(error, response, body) {
