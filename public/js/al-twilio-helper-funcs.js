@@ -1,17 +1,15 @@
-require('dotenv').load();
-
 function changeState(state) {
     console.log("trying to change state to state " + state);
-    var activitySid = process.env.idleActivitySid;
+    var activitySid = WAd66cf5b6af64709c0ca3cf2734c56662;
     switch (state) {
         case "Idle":
-            activitySid = process.env.idleActivitySid;
+            activitySid = WAd66cf5b6af64709c0ca3cf2734c56662;
             break;
         case "Offline":
-            activitySid = process.env.offlineActivitySid;
+            activitySid = WA6e6f917c63efcbc912c2c84f4187f618;
             break;
         case "Busy":
-            activitySid = process.env.busyActivitySid;
+            activitySid = WAf0b881ff45e162bf0b9e3c6ae60d5ee0;
             break;
     }
     console.log(activitySid);
