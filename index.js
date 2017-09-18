@@ -518,7 +518,7 @@ function handleInboundFBMessage(facebookId, taskSid, messageBody) {
 
     var options = {
         method: 'GET',
-        url: 'https://graph.facebook.com/v2.6/' + facebookId + '?fields=first_name,last_name,profile_pic&access_token=' + pageAccessToken,
+        url: 'https://graph.facebook.com/v2.6/' + facebookId + '?fields=first_name,last_name,profile_pic&access_token=' + pageAccessToken
     };
 
     req(options, function(error, response, body) {
